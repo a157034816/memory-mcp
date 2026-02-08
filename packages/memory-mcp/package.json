@@ -1,6 +1,6 @@
 {
   "name": "@a157034816/memory-mcp",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Memory MCP server launcher (npx).",
   "bin": "run.js",
   "files": [
@@ -10,12 +10,12 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@a157034816/memory-mcp-win32-x64": "0.1.6",
-    "@a157034816/memory-mcp-win32-arm64": "0.1.6",
-    "@a157034816/memory-mcp-darwin-x64": "0.1.6",
-    "@a157034816/memory-mcp-darwin-arm64": "0.1.6",
-    "@a157034816/memory-mcp-linux-x64": "0.1.6",
-    "@a157034816/memory-mcp-linux-arm64": "0.1.6"
+    "@a157034816/memory-mcp-win32-x64": "0.1.7",
+    "@a157034816/memory-mcp-win32-arm64": "0.1.7",
+    "@a157034816/memory-mcp-darwin-x64": "0.1.7",
+    "@a157034816/memory-mcp-darwin-arm64": "0.1.7",
+    "@a157034816/memory-mcp-linux-x64": "0.1.7",
+    "@a157034816/memory-mcp-linux-arm64": "0.1.7"
   },
   "license": "UNLICENSED",
   "publishConfig": {

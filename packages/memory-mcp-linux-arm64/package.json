@@ -1,6 +1,6 @@
 {
   "name": "@a157034816/memory-mcp-linux-arm64",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Platform binary for Memory MCP (linux-arm64, musl).",
   "os": [
     "linux"
