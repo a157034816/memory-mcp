@@ -1,0 +1,20 @@
+{
+  "name": "@a157034816/memory-mcp-darwin-arm64",
+  "version": "0.1.6",
+  "description": "Platform binary for Memory MCP (darwin-arm64).",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "bin/**"
+  ],
+  "license": "UNLICENSED",
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,351 @@
+name: release-npm
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc,aarch64-pc-windows-msvc
+
+      - name: Build x86_64-pc-windows-msvc (static CRT)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Build aarch64-pc-windows-msvc (static CRT)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --target aarch64-pc-windows-msvc
+
+      - name: Upload x86_64-pc-windows-msvc
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-x86_64-pc-windows-msvc
+          path: target/x86_64-pc-windows-msvc/release/memory.exe
+
+      - name: Upload aarch64-pc-windows-msvc
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-aarch64-pc-windows-msvc
+          path: target/aarch64-pc-windows-msvc/release/memory.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build aarch64-apple-darwin
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build x86_64-apple-darwin
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Upload aarch64-apple-darwin
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/memory
+
+      - name: Upload x86_64-apple-darwin
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-x86_64-apple-darwin
+          path: target/x86_64-apple-darwin/release/memory
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build x86_64-unknown-linux-musl
+        env:
+          CARGO_TARGET_DIR: target/cross-x86_64
+        run: cross build --release --target x86_64-unknown-linux-musl
+
+      - name: Build aarch64-unknown-linux-musl
+        env:
+          CARGO_TARGET_DIR: target/cross-aarch64
+        run: cross build --release --target aarch64-unknown-linux-musl
+
+      - name: Upload x86_64-unknown-linux-musl
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-x86_64-unknown-linux-musl
+          path: target/cross-x86_64/x86_64-unknown-linux-musl/release/memory
+
+      - name: Upload aarch64-unknown-linux-musl
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-aarch64-unknown-linux-musl
+          path: target/cross-aarch64/aarch64-unknown-linux-musl/release/memory
+
+  publish-npm:
+    runs-on: ubuntu-latest
+    needs:
+      - build-windows
+      - build-macos
+      - build-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/artifacts
+
+      - name: Verify versions match tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const tag = (process.env.GITHUB_REF_NAME || '').replace(/^v/, '');
+          if (!tag) {
+            console.error('GITHUB_REF_NAME is empty');
+            process.exit(1);
+          }
+
+          const cargoToml = fs.readFileSync('Cargo.toml', 'utf8');
+          const cargoMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"\s*$/m);
+          if (!cargoMatch) {
+            console.error('Failed to read version from Cargo.toml');
+            process.exit(1);
+          }
+          const cargoVersion = cargoMatch[1];
+
+          if (cargoVersion !== tag) {
+            console.error(`Tag version (${tag}) != Cargo.toml version (${cargoVersion})`);
+            process.exit(1);
+          }
+
+          const packagesDir = path.join(process.cwd(), 'packages');
+          for (const dirent of fs.readdirSync(packagesDir, { withFileTypes: true })) {
+            if (!dirent.isDirectory()) continue;
+            const pkgPath = path.join(packagesDir, dirent.name, 'package.json');
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            if (pkg.version !== tag) {
+              console.error(`Tag version (${tag}) != ${pkgPath} version (${pkg.version})`);
+              process.exit(1);
+            }
+          }
+
+          console.log(`Versions OK: ${tag}`);
+          NODE
+
+      - name: Copy binaries into npm packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p packages/memory-mcp-win32-x64/bin
+          mkdir -p packages/memory-mcp-win32-arm64/bin
+          mkdir -p packages/memory-mcp-darwin-x64/bin
+          mkdir -p packages/memory-mcp-darwin-arm64/bin
+          mkdir -p packages/memory-mcp-linux-x64/bin
+          mkdir -p packages/memory-mcp-linux-arm64/bin
+
+          cp "dist/artifacts/memory-x86_64-pc-windows-msvc/memory.exe" "packages/memory-mcp-win32-x64/bin/memory.exe"
+          cp "dist/artifacts/memory-aarch64-pc-windows-msvc/memory.exe" "packages/memory-mcp-win32-arm64/bin/memory.exe"
+
+          cp "dist/artifacts/memory-x86_64-apple-darwin/memory" "packages/memory-mcp-darwin-x64/bin/memory"
+          cp "dist/artifacts/memory-aarch64-apple-darwin/memory" "packages/memory-mcp-darwin-arm64/bin/memory"
+
+          cp "dist/artifacts/memory-x86_64-unknown-linux-musl/memory" "packages/memory-mcp-linux-x64/bin/memory"
+          cp "dist/artifacts/memory-aarch64-unknown-linux-musl/memory" "packages/memory-mcp-linux-arm64/bin/memory"
+
+          chmod +x packages/memory-mcp-darwin-x64/bin/memory
+          chmod +x packages/memory-mcp-darwin-arm64/bin/memory
+          chmod +x packages/memory-mcp-linux-x64/bin/memory
+          chmod +x packages/memory-mcp-linux-arm64/bin/memory
+
+      - name: Publish platform packages
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          for dir in \
+            packages/memory-mcp-win32-x64 \
+            packages/memory-mcp-win32-arm64 \
+            packages/memory-mcp-darwin-x64 \
+            packages/memory-mcp-darwin-arm64 \
+            packages/memory-mcp-linux-x64 \
+            packages/memory-mcp-linux-arm64
+          do
+            (cd "$dir" && npm publish --access public)
+            sleep 5
+          done
+
+      - name: Publish main package
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          (cd packages/memory-mcp && npm publish --access public)
+
+  publish-github-release:
+    runs-on: ubuntu-latest
+    needs:
+      - build-windows
+      - build-macos
+      - build-linux
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/artifacts
+
+      - name: Verify versions match tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const tag = (process.env.GITHUB_REF_NAME || '').replace(/^v/, '');
+          if (!tag) {
+            console.error('GITHUB_REF_NAME is empty');
+            process.exit(1);
+          }
+
+          const cargoToml = fs.readFileSync('Cargo.toml', 'utf8');
+          const cargoMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"\s*$/m);
+          if (!cargoMatch) {
+            console.error('Failed to read version from Cargo.toml');
+            process.exit(1);
+          }
+          const cargoVersion = cargoMatch[1];
+
+          if (cargoVersion !== tag) {
+            console.error(`Tag version (${tag}) != Cargo.toml version (${cargoVersion})`);
+            process.exit(1);
+          }
+
+          const packagesDir = path.join(process.cwd(), 'packages');
+          for (const dirent of fs.readdirSync(packagesDir, { withFileTypes: true })) {
+            if (!dirent.isDirectory()) continue;
+            const pkgPath = path.join(packagesDir, dirent.name, 'package.json');
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            if (pkg.version !== tag) {
+              console.error(`Tag version (${tag}) != ${pkgPath} version (${pkg.version})`);
+              process.exit(1);
+            }
+          }
+
+          console.log(`Versions OK: ${tag}`);
+          NODE
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+
+          mkdir -p dist/release-assets
+
+          cp "dist/artifacts/memory-x86_64-pc-windows-msvc/memory.exe" "dist/release-assets/memory-v${version}-x86_64-pc-windows-msvc.exe"
+          cp "dist/artifacts/memory-aarch64-pc-windows-msvc/memory.exe" "dist/release-assets/memory-v${version}-aarch64-pc-windows-msvc.exe"
+
+          cp "dist/artifacts/memory-x86_64-apple-darwin/memory" "dist/release-assets/memory-v${version}-x86_64-apple-darwin"
+          cp "dist/artifacts/memory-aarch64-apple-darwin/memory" "dist/release-assets/memory-v${version}-aarch64-apple-darwin"
+
+          cp "dist/artifacts/memory-x86_64-unknown-linux-musl/memory" "dist/release-assets/memory-v${version}-x86_64-unknown-linux-musl"
+          cp "dist/artifacts/memory-aarch64-unknown-linux-musl/memory" "dist/release-assets/memory-v${version}-aarch64-unknown-linux-musl"
+
+          (cd dist/release-assets && sha256sum "memory-v${version}-"* | sort -k2 > SHA256SUMS.txt)
+
+      - name: Delete existing release assets (if any)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          api="https://api.github.com"
+          repo="${GITHUB_REPOSITORY}"
+
+          release_json="$(curl -sS \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${api}/repos/${repo}/releases/tags/${tag}" || true)"
+
+          if [ -z "${release_json}" ]; then
+            echo "No existing release for ${tag}; skip delete."
+            exit 0
+          fi
+
+          ls -1 dist/release-assets > dist/asset-names.txt
+          printf '%s' "${release_json}" > dist/release.json
+
+          node - <<'NODE' | while IFS=$'\t' read -r id name; do
+          const fs = require('node:fs');
+
+          const release = JSON.parse(fs.readFileSync('dist/release.json', 'utf8'));
+          const wanted = new Set(
+            fs
+              .readFileSync('dist/asset-names.txt', 'utf8')
+              .split(/\r?\n/)
+              .map((s) => s.trim())
+              .filter(Boolean)
+          );
+
+          for (const asset of release.assets || []) {
+            if (wanted.has(asset.name)) {
+              process.stdout.write(`${asset.id}\t${asset.name}\n`);
+            }
+          }
+          NODE
+            echo "Deleting existing asset: ${name} (${id})"
+            curl -sS -X DELETE \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "${api}/repos/${repo}/releases/assets/${id}"
+          done
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ github.token }}
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/release-assets/*

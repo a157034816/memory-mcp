@@ -1,0 +1,18 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.pyc
+
+# Node / npm
+/node_modules/
+/packages/*/node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Optional: when you want to store memory data under the repo for local dev,
+# set MEMORY_STORE_DIR to this folder.
+/.memory_store/

@@ -1,0 +1,20 @@
+{
+  "name": "@a157034816/memory-mcp-linux-x64",
+  "version": "0.1.6",
+  "description": "Platform binary for Memory MCP (linux-x64, musl).",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "bin/**"
+  ],
+  "license": "UNLICENSED",
+  "publishConfig": {
+    "access": "public"
+  }
+}

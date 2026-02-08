@@ -1,0 +1,20 @@
+{
+  "name": "@a157034816/memory-mcp-win32-x64",
+  "version": "0.1.6",
+  "description": "Platform binary for Memory MCP (win32-x64).",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "bin/**"
+  ],
+  "license": "UNLICENSED",
+  "publishConfig": {
+    "access": "public"
+  }
+}
