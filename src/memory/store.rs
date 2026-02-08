@@ -1,4 +1,4 @@
-use crate::memory::index::IndexData;
+use crate::memory::index::{IndexData, INDEX_VERSION};
 use crate::memory::model::{MemoryItem, RecallArgs, RecallItemOut, RecallResult, RememberArgs};
 use crate::memory::time::{self, DateBoundKind};
 use std::collections::{HashMap, HashSet};
@@ -17,12 +17,19 @@ pub struct StorePaths {
 
 impl StorePaths {
     pub fn new(root_dir: &Path, namespace: &str) -> Result<Self, String> {
-        let namespace = namespace.trim().to_string();
-        if namespace.is_empty() {
+        let raw = namespace.trim();
+        if raw.is_empty() {
             return Err("namespace 不能为空".to_string());
         }
 
-        let namespace_dir = resolve_namespace_dir(root_dir, &namespace);
+        let parts = parse_namespace_components(raw)?;
+        let namespace = parts.join("/");
+
+        let mut namespace_dir = root_dir.to_path_buf();
+        for p in &parts {
+            namespace_dir.push(p);
+        }
+
         let memories_path = namespace_dir.join("memories.jsonl");
         let index_path = namespace_dir.join("index.json");
 
@@ -61,6 +68,10 @@ impl NamespaceState {
         Ok(Self { paths, index })
     }
 
+    pub fn namespace(&self) -> &str {
+        &self.paths.namespace
+    }
+
     pub fn list_keywords(&mut self) -> Result<Vec<String>, String> {
         self.sync_index().map_err(|e| e.to_string())?;
 
@@ -75,6 +86,12 @@ impl NamespaceState {
     }
 
     pub fn append_memory(&mut self, args: RememberArgs) -> Result<RememberRecorded, String> {
+        if let Some(n) = args.importance {
+            if !(1..=5).contains(&n) {
+                return Err("importance 必须在 1~5".to_string());
+            }
+        }
+
         self.sync_index().map_err(|e| e.to_string())?;
 
         let namespace = self.paths.namespace.clone();
@@ -156,11 +173,7 @@ impl NamespaceState {
         } else {
             Some(keywords.iter().cloned().collect())
         };
-        let query = args
-            .query
-            .as_ref()
-            .map(|x| x.trim().to_lowercase())
-            .filter(|x| !x.is_empty());
+        let (query, query_start_ts, query_end_ts) = parse_query_time_expr(args.query.as_deref());
 
         let start_ts = match args.start.as_deref() {
             Some(s) => Some(time::parse_time_to_ts_and_canonical(s, DateBoundKind::Start)?.0),
@@ -170,6 +183,18 @@ impl NamespaceState {
             Some(s) => Some(time::parse_time_to_ts_and_canonical(s, DateBoundKind::End)?.0),
             None => None,
         };
+
+        let start_ts = max_opt_i64(start_ts, query_start_ts);
+        let end_ts = min_opt_i64(end_ts, query_end_ts);
+
+        if let (Some(s), Some(e)) = (start_ts, end_ts) {
+            if s > e {
+                return Ok(RecallResult {
+                    total: 0,
+                    items: Vec::new(),
+                });
+            }
+        }
 
         let mut results: Vec<RecallItemOut> = Vec::new();
 
@@ -331,16 +356,126 @@ fn normalize_keywords(keywords: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
     for kw in keywords {
-        let norm = kw.trim().to_lowercase();
+        let trimmed = kw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // 时间不参与 keywords：提示词层面要求调用方使用 occurred_at/start/end/query 管理时间；
+        // 这里做兜底过滤，避免日期/时间字符串污染关键字词表（影响 keywords_list/keywords_list_global 复用质量）。
+        if is_time_like_keyword(trimmed) {
+            continue;
+        }
+
+        let norm = trimmed.to_lowercase();
         if norm.is_empty() {
             continue;
         }
+
         if seen.insert(norm.clone()) {
             out.push(norm);
         }
     }
 
     out
+}
+
+pub(super) fn is_time_like_keyword(text: &str) -> bool {
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.is_empty() {
+        return false;
+    }
+
+    // RFC3339 / YYYY-MM-DD
+    if time::parse_time_to_ts_and_canonical(&compact, DateBoundKind::Start).is_ok() {
+        return true;
+    }
+
+    // 简单范围表达式：a..b
+    if let Some((a, b)) = compact.split_once("..") {
+        if time::parse_time_to_ts_and_canonical(a, DateBoundKind::Start).is_ok()
+            && time::parse_time_to_ts_and_canonical(b, DateBoundKind::End).is_ok()
+        {
+            return true;
+        }
+    }
+
+    // 中文日期：YYYY年M月D日
+    if parse_ymd_zh(&compact).is_some() {
+        return true;
+    }
+
+    // 中文年/月/日 token（历史数据或调用方误传时也视为“时间类关键字”）
+    if is_year_token_zh(&compact) || is_month_token_zh(&compact) || is_day_token_zh(&compact) {
+        return true;
+    }
+
+    false
+}
+
+fn is_year_token_zh(text: &str) -> bool {
+    let Some(num) = text.strip_suffix('年') else {
+        return false;
+    };
+    if num.len() != 4 || !num.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let Ok(y) = num.parse::<i32>() else {
+        return false;
+    };
+    (1..=9999).contains(&y)
+}
+
+fn is_month_token_zh(text: &str) -> bool {
+    let Some(num) = text.strip_suffix('月') else {
+        return false;
+    };
+    if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let Ok(m) = num.parse::<u32>() else {
+        return false;
+    };
+    (1..=12).contains(&m)
+}
+
+fn is_day_token_zh(text: &str) -> bool {
+    let Some(num) = text.strip_suffix('日') else {
+        return false;
+    };
+    if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let Ok(d) = num.parse::<u32>() else {
+        return false;
+    };
+    (1..=31).contains(&d)
+}
+
+fn parse_ymd_zh(text: &str) -> Option<(i32, u32, u32)> {
+    let (y_part, rest) = text.split_once('年')?;
+    let (m_part, rest) = rest.split_once('月')?;
+    let (d_part, tail) = rest.split_once('日')?;
+
+    if !tail.is_empty() || y_part.is_empty() || m_part.is_empty() || d_part.is_empty() {
+        return None;
+    }
+    if !y_part.chars().all(|c| c.is_ascii_digit())
+        || !m_part.chars().all(|c| c.is_ascii_digit())
+        || !d_part.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let y: i32 = y_part.parse().ok()?;
+    let m: u32 = m_part.parse().ok()?;
+    let d: u32 = d_part.parse().ok()?;
+
+    if !(1..=9999).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+
+    Some((y, m, d))
 }
 
 fn in_time_range(ts: i64, start: Option<i64>, end: Option<i64>) -> bool {
@@ -357,25 +492,116 @@ fn in_time_range(ts: i64, start: Option<i64>, end: Option<i64>) -> bool {
     true
 }
 
-fn resolve_namespace_dir(root_dir: &Path, namespace: &str) -> PathBuf {
-    let ns = namespace.replace('\\', "/");
-    let parts = ns.split('/').filter_map(|p| {
-        let p = p.trim();
-        if p.is_empty() || p == "." || p == ".." {
-            return None;
-        }
-        Some(sanitize_path_component(p))
-    });
+fn max_opt_i64(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }
+}
 
-    let mut dir = root_dir.to_path_buf();
-    let mut any = false;
-    for p in parts {
-        any = true;
-        dir.push(p);
+fn min_opt_i64(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }
+}
+
+fn strip_prefix_case_insensitive<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    if text.len() < prefix.len() {
+        return None;
+    }
+    let (head, tail) = text.split_at(prefix.len());
+    head.eq_ignore_ascii_case(prefix).then_some(tail)
+}
+
+fn parse_query_time_expr(query: Option<&str>) -> (Option<String>, Option<i64>, Option<i64>) {
+    let Some(q) = query.map(|x| x.trim()).filter(|x| !x.is_empty()) else {
+        return (None, None, None);
+    };
+
+    let mut start_ts: Option<i64> = None;
+    let mut end_ts: Option<i64> = None;
+    let mut text_tokens: Vec<&str> = Vec::new();
+
+    for token in q.split_whitespace() {
+        if let Some(v) = strip_prefix_case_insensitive(token, "time>=") {
+            if let Ok((ts, _)) = time::parse_time_to_ts_and_canonical(v, DateBoundKind::Start) {
+                start_ts = max_opt_i64(start_ts, Some(ts));
+                continue;
+            }
+        }
+
+        if let Some(v) = strip_prefix_case_insensitive(token, "time<=") {
+            if let Ok((ts, _)) = time::parse_time_to_ts_and_canonical(v, DateBoundKind::End) {
+                end_ts = min_opt_i64(end_ts, Some(ts));
+                continue;
+            }
+        }
+
+        if let Some(v) = strip_prefix_case_insensitive(token, "time=") {
+            if let Some((a, b)) = v.split_once("..") {
+                if let Ok((a_ts, _)) = time::parse_time_to_ts_and_canonical(a, DateBoundKind::Start)
+                {
+                    if let Ok((b_ts, _)) =
+                        time::parse_time_to_ts_and_canonical(b, DateBoundKind::End)
+                    {
+                        start_ts = max_opt_i64(start_ts, Some(a_ts));
+                        end_ts = min_opt_i64(end_ts, Some(b_ts));
+                        continue;
+                    }
+                }
+            } else if let Ok((a_ts, _)) = time::parse_time_to_ts_and_canonical(v, DateBoundKind::Start)
+            {
+                if let Ok((b_ts, _)) = time::parse_time_to_ts_and_canonical(v, DateBoundKind::End)
+                {
+                    start_ts = max_opt_i64(start_ts, Some(a_ts));
+                    end_ts = min_opt_i64(end_ts, Some(b_ts));
+                    continue;
+                }
+            }
+        }
+
+        text_tokens.push(token);
     }
 
-    if !any {
-        dir.push("default");
+    let text = text_tokens.join(" ");
+    let text = text.trim().to_lowercase();
+    let text = if text.is_empty() { None } else { Some(text) };
+
+    (text, start_ts, end_ts)
+}
+
+fn parse_namespace_components(namespace: &str) -> Result<Vec<String>, String> {
+    // namespace 与目录结构严格绑定：归一化后生成 canonical 字符串与目录路径。
+    // 目的：避免 "u1\\p1/" 与 "u1/p1" 这类等价写法导致的缓存分裂与可见性问题。
+    let ns = namespace.trim().replace('\\', "/");
+    let parts: Vec<String> = ns
+        .split('/')
+        .filter_map(|p| {
+            let p = p.trim();
+            if p.is_empty() || p == "." || p == ".." {
+                return None;
+            }
+            Some(sanitize_path_component(p))
+        })
+        .collect();
+
+    if parts.len() != 2 {
+        return Err("namespace 必须为 {userId}/{projectId}".to_string());
+    }
+
+    Ok(parts)
+}
+
+#[cfg(test)]
+fn resolve_namespace_dir(root_dir: &Path, namespace: &str) -> PathBuf {
+    let mut dir = root_dir.to_path_buf();
+    for p in parse_namespace_components(namespace).expect("parse namespace") {
+        dir.push(p);
     }
 
     dir
@@ -412,14 +638,15 @@ fn load_or_create_index(paths: &StorePaths) -> Result<IndexData, String> {
     let mut index: IndexData =
         serde_json::from_str(&text).map_err(|e| format!("parse index.json failed: {e}"))?;
 
-    if index.version != 1 {
+    if index.version != INDEX_VERSION {
         index = IndexData::new(&paths.namespace);
         save_index(paths, &index)?;
         return Ok(index);
     }
 
-    if index.namespace.trim() != paths.namespace {
+    if index.namespace != paths.namespace {
         index.namespace = paths.namespace.clone();
+        save_index(paths, &index)?;
     }
 
     Ok(index)

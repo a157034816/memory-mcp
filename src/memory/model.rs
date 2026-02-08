@@ -39,6 +39,12 @@ impl RememberArgs {
         let importance = get_optional_u8(v, "importance")?;
         let source = get_optional_string(v, "source")?;
 
+        if let Some(n) = importance {
+            if !(1..=5).contains(&n) {
+                return Err("importance 必须在 1~5".to_string());
+            }
+        }
+
         Ok(Self {
             namespace,
             keywords,

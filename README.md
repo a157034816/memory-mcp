@@ -11,7 +11,7 @@ Memory 是一个 MCP stdio server（Rust），用于为 AI 调用方提供“长
 - `recall`：按关键字与时间范围检索记忆，并返回最相关的若干条。
 
 > 说明：Memory 只负责“存取与检索”。
-> - `userId/projectId`（即 namespace 的组成）由调用方从项目上下文中获取后传入。
+> - `namespace` 由调用方从项目上下文中获取后传入；**必须为** `{userId}/{projectId}`（严格两段）。
 > - 何时记、如何提取关键字/时间范围由提示词与调用方策略决定。
 
 ## 与 MCP Client 集成（npx，推荐）
@@ -98,8 +98,8 @@ Memory 是一个 MCP stdio server（Rust），用于为 AI 调用方提供“长
 
 必填：
 
-- `namespace`: `string`（建议 `{userId}/{projectId}`，用于隔离不同用户/项目）
-- `keywords`: `string[]`（至少 1 个）
+- `namespace`: `string`（必须为 `{userId}/{projectId}`；严格两段，用于隔离不同用户/项目）
+- `keywords`: `string[]`（至少 1 个；会做 trim+lowercase 并去重；时间类关键字会被忽略）
 - `slice`: `string`
 - `diary`: `string`
 
@@ -120,7 +120,7 @@ Memory 是一个 MCP stdio server（Rust），用于为 AI 调用方提供“长
 - `keywords`: `string[]`
 - `start`: `string`（RFC3339 或 `YYYY-MM-DD`）
 - `end`: `string`（RFC3339 或 `YYYY-MM-DD`）
-- `query`: `string`（包含匹配 `slice/diary/source`）
+- `query`: `string`（包含匹配 `slice/diary/source`；支持 `time>=...` / `time<=...` / `time=a..b` 时间表达式）
 - `limit`: `integer`（默认 20，最大 100）
 - `include_diary`: `boolean`（默认 `false`；为避免泄露/噪声，默认不返回 diary）
 
@@ -133,7 +133,8 @@ Memory 是一个 MCP stdio server（Rust），用于为 AI 调用方提供“长
 - 存储根目录：
   - 优先：环境变量 `MEMORY_STORE_DIR`
   - 否则：使用 OS 用户数据目录（例如 Windows 的 LocalAppData 下）
-- 每个 `namespace` 单独一个目录（会对路径非法字符做净化，防止路径穿越）。
+- 每个 `namespace` 单独一个目录（目录层级为 `{userId}/{projectId}`；会对路径非法字符做净化，防止路径穿越；并会将 `\\` 归一化为 `/`，忽略空段与 `.`/`..`）。  
+  - 示例：`namespace="u1/p1"` → `.../u1/p1/`
 - `memories.jsonl`：追加写（append-only），每行一条 JSON。
 - `index.json`：索引文件，用于加速检索：
   - 倒排：`keyword -> itemIndex[]`
@@ -144,7 +145,7 @@ Memory 是一个 MCP stdio server（Rust），用于为 AI 调用方提供“长
 
 ## namespace 生成建议（示例）
 
-建议在调用方统一生成 `userId/projectId`（用于隔离不同用户/项目/工作区的记忆）：
+建议在调用方统一生成稳定的 `namespace`（用于隔离不同用户/项目/工作区的记忆）。**必须为** `{userId}/{projectId}`（严格两段）：
 
 - `userId`：当前登录用户的唯一标识（例如用户 ID，或稳定的匿名化标识）
 - `projectId`：当前项目/工作区/仓库/租户的唯一标识（例如 workspace id、repo 名称、tenant id）
@@ -285,13 +286,15 @@ cross build --release --target aarch64-unknown-linux-musl
 - 回忆：mcp_memory__recall
 
 硬性规则（违反即视为回答不合格，应先补充工具调用再回答）：
-1) 当用户询问“现在几点/今天几号/今天是周几/当前日期时间/时区偏移”等，先调用 now，再回答。
+1) 当用户询问“现在几点/当前日期（YYYY年M月D日）/当前是周几/当前日期时间/时区偏移”等：如果对话上下文中已明确给出当前时间（例如系统提示/工具输出/用户提供的 RFC3339 或 YYYY-MM-DD），则直接使用该时间作为基准回答，无需调用 now；否则先调用 now，再回答。
 2) 当你准备调用 remember/recall 且不确定可用关键字时，先调用 keywords_list(namespace={namespace}) 获取既有关键字；如果为空，再调用 keywords_list_global 参考全局词表。
 3) 关键字策略：keywords 至少 1 个；每个关键字尽量短（建议 1~4 个汉字或 1~12 个字符），避免长句；优先复用既有关键字；若词表里没有合适关键字，则由你自行创建一个新的短关键字（后续即可被 keywords_list 复用）。
-4) 只要问题涉及“过去发生过什么/用户偏好/项目历史/之前的约定/曾经提到过”，先调用 recall，再基于结果回答。
-5) 只要用户提出“以后/下次/明天/某天提醒我/预约/截止/计划”等未来安排，立刻调用 remember 记录；如果包含相对时间（如“明天/下周一”），先 now 确定基准日期再记录；若有明确日期时间，用 occurred_at 写入该日期时间（即使是未来）。
-6) 当用户提供可复用且长期有效的信息（偏好、背景、项目里程碑、关键决定、需求变更、环境约定等）时，立刻调用 remember 记录。
-7) remember/recall/keywords_list 工具调用必须带 namespace={namespace}（建议为 {userId}/{projectId}）；now/keywords_list_global 不需要 namespace；不要向用户索要 namespace。
-8) remember 填参建议：keywords=3~8 个；slice=1~3 句客观摘要；diary=补充上下文/原因/后续影响；有明确时间则填 occurred_at；明显关键则 importance=4~5。
-9) 避免记录敏感信息（密码、token、隐私、支付信息等）；不确定是否敏感时不要记或降低细节。
-```
+4) 日期关键字策略：当你需要检索某个具体日期（例如“2025年7月12日”），更推荐使用 keywords=["2025年","7月","12日"] 的组合；当记忆关键字中包含完整日期（如“2025年7月12日”或“2025-07-12”）时，Memory 会自动补充“2025年/7月/12日”这类派生关键字，便于用“7月”“12日”等短关键字匹配。
+5) 只要问题涉及“过去发生过什么/用户偏好/项目历史/之前的约定/曾经提到过”，先调用 recall，再基于结果回答。
+6) 只要用户提出“以后/下次/在 YYYY年M月D日 提醒我/预约/截止/计划”等未来安排，立刻调用 remember 记录；如果包含相对时间（如“下周一/下个月”），优先使用对话上下文中已明确给出的当前时间作为基准；若上下文未提供当前时间，再先 now 确定基准日期后记录；若有明确日期时间，用 occurred_at 写入该日期时间（即使是未来）。
+7) 过程复盘记录（工作/跑团）：当你正在执行某个任务（写代码/调试/评审/整理资料等）或参与跑团（例如 TNT）时，以“可复盘”为目标主动记忆：每当发生“目标变化/关键决策/重要结论/新线索与情报/战斗结果与资源变化/阻塞与解决/里程碑完成/下一步计划”任一事件，立刻调用 remember 记录当下进展；若一段阶段/场景已经收束但未触发上述事件，也应补一条“进度快照”（建议 keywords 至少包含“进度”或“跑团”+ 团名/角色/地点；跑团可额外加 npc/线索/战斗/道具/任务；slice 写客观进展；diary 写原因/影响/待办与悬念；必要时避免相对时间表述：若上下文已说明当前时间则直接使用，否则先 now，再把时间写为 RFC3339 或 YYYY-MM-DD；关键节点可设 importance=4~5）。
+8) 当用户提供可复用且长期有效的信息（偏好、背景、项目里程碑、关键决定、需求变更、环境约定等）时，立刻调用 remember 记录。
+9) remember/recall/keywords_list 工具调用必须带 namespace={namespace}，且 **namespace 必须为 `{userId}/{projectId}`**（严格两段）；now/keywords_list_global 不需要 namespace；不要向用户索要 namespace。
+10) remember 填参建议：keywords=3~8 个；slice=1~3 句客观摘要；diary=补充上下文/原因/后续影响；有明确时间则填 occurred_at；明显关键则 importance=4~5。
+11) 避免记录敏感信息（密码、token、隐私、支付信息等）；不确定是否敏感时不要记或降低细节。
+``` 

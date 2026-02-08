@@ -83,7 +83,7 @@ fn handle_tools_list(id: Option<i64>) -> Result<Option<Value>, String> {
                     },
                     {
                         "name": "remember",
-                        "description": "记录一条长期记忆（关键字会归一化为小写 + 内容切片 + AI 日记），用于后续检索。",
+                        "description": "记录一条长期记忆（关键字会归一化为小写；时间类关键字会被忽略 + 内容切片 + AI 日记），用于后续检索。",
                         "inputSchema": remember_schema()
                     },
                     {
@@ -161,7 +161,7 @@ fn keywords_list_schema() -> Value {
             "namespace": {
                 "type": "string",
                 "minLength": 1,
-                "description": "命名空间：建议为 {userId}/{projectId}。"
+                "description": "命名空间：必须为 {userId}/{projectId}（严格两段；会做分隔符归一化与路径净化）。"
             }
         }
     })
@@ -186,13 +186,13 @@ fn remember_schema() -> Value {
         "properties": {
             "namespace": {
                 "type": "string",
-                "description": "命名空间：建议为 {userId}/{projectId}，用于隔离不同用户/项目的记忆。"
+                "description": "命名空间：必须为 {userId}/{projectId}（严格两段），用于隔离不同用户/项目的记忆；会做分隔符归一化与路径净化。"
             },
             "keywords": {
                 "type": "array",
                 "minItems": 1,
                 "items": { "type": "string" },
-                "description": "关键字列表（至少 1 个，建议 2~8 个；会做 trim+lowercase 并去重）。"
+                "description": "关键字列表（至少 1 个，建议 2~8 个；会做 trim+lowercase 并去重；时间类关键字会被忽略）。"
             },
             "slice": {
                 "type": "string",
@@ -323,6 +323,51 @@ mod tests {
             .expect("handle")
             .expect("response");
         let v: Value = serde_json::from_str(&out).expect("json");
+        let keywords = v["result"]["data"]["keywords"].as_array().expect("keywords");
+        assert_eq!(keywords[0].as_str().unwrap(), "项目");
+        assert_eq!(keywords[1].as_str().unwrap(), "erp");
+    }
+
+    #[test]
+    fn tools_call_keywords_list_should_work_with_noncanonical_namespace() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let mut engine = MemoryEngine::new(dir.path().to_path_buf());
+
+        let remember = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "remember",
+                "arguments": {
+                    "namespace": "u1\\p1//",
+                    "keywords": ["ERP", "项目"],
+                    "slice": "slice",
+                    "diary": "diary"
+                }
+            }
+        })
+        .to_string();
+        let _ = handle_stdin_line(&mut engine, &remember)
+            .expect("handle")
+            .expect("response");
+
+        let list = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "keywords_list",
+                "arguments": { "namespace": "u1/p1" }
+            }
+        })
+        .to_string();
+        let out = handle_stdin_line(&mut engine, &list)
+            .expect("handle")
+            .expect("response");
+        let v: Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(v["result"]["data"]["namespace"].as_str().unwrap(), "u1/p1");
+
         let keywords = v["result"]["data"]["keywords"].as_array().expect("keywords");
         assert_eq!(keywords[0].as_str().unwrap(), "项目");
         assert_eq!(keywords[1].as_str().unwrap(), "erp");
@@ -468,6 +513,87 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert!(items[0].get("matched_keywords").is_none());
     }
+
+    #[test]
+    fn tools_call_remember_importance_out_of_range_should_error() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let mut engine = MemoryEngine::new(dir.path().to_path_buf());
+
+        let remember = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "remember",
+                "arguments": {
+                    "namespace": "u1/p1",
+                    "keywords": ["项目"],
+                    "slice": "slice",
+                    "diary": "diary",
+                    "importance": 6
+                }
+            }
+        })
+        .to_string();
+
+        let err = handle_stdin_line(&mut engine, &remember)
+            .err()
+            .expect("should error");
+        assert!(err.contains("importance"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn tools_call_recall_should_support_query_time_expr() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let mut engine = MemoryEngine::new(dir.path().to_path_buf());
+
+        for (id, slice, occurred_at) in [
+            (1, "older", "2025-04-01"),
+            (2, "newer", "2025-05-01"),
+        ] {
+            let remember = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "remember",
+                    "arguments": {
+                        "namespace": "u1/p1",
+                        "keywords": ["k"],
+                        "slice": slice,
+                        "diary": "diary",
+                        "occurred_at": occurred_at
+                    }
+                }
+            })
+            .to_string();
+            let _ = handle_stdin_line(&mut engine, &remember)
+                .expect("handle")
+                .expect("response");
+        }
+
+        let recall = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "recall",
+                "arguments": {
+                    "namespace": "u1/p1",
+                    "query": "time>=2025-05-01",
+                    "limit": 10
+                }
+            }
+        })
+        .to_string();
+        let out = handle_stdin_line(&mut engine, &recall)
+            .expect("handle")
+            .expect("response");
+        let v: Value = serde_json::from_str(&out).expect("json");
+        let items = v["result"]["data"]["items"].as_array().expect("items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["slice"].as_str().unwrap(), "newer");
+    }
 }
 
 fn recall_schema() -> Value {
@@ -478,7 +604,7 @@ fn recall_schema() -> Value {
         "properties": {
             "namespace": {
                 "type": "string",
-                "description": "命名空间：建议为 {userId}/{projectId}。"
+                "description": "命名空间：必须为 {userId}/{projectId}（严格两段；会做分隔符归一化与路径净化）。"
             },
             "keywords": {
                 "type": "array",
@@ -495,7 +621,7 @@ fn recall_schema() -> Value {
             },
             "query": {
                 "type": "string",
-                "description": "自由文本查询（可选，包含匹配 slice/diary/source）。"
+                "description": "自由文本查询（可选，包含匹配 slice/diary/source；支持 time>=... / time<=... / time=a..b 时间表达式）。"
             },
             "limit": {
                 "type": "integer",

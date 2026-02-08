@@ -2,6 +2,11 @@ use crate::memory::model::MemoryItem;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// 索引文件版本号。
+///
+/// 变更索引规则（例如关键字归一化策略）时递增，以触发旧索引自动重建。
+pub const INDEX_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexItem {
     pub id: String,
@@ -38,7 +43,7 @@ pub struct IndexData {
 impl IndexData {
     pub fn new(namespace: &str) -> Self {
         Self {
-            version: 1,
+            version: INDEX_VERSION,
             namespace: namespace.to_string(),
             memories_file: "memories.jsonl".to_string(),
             indexed_up_to_offset: 0,

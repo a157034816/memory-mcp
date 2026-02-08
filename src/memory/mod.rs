@@ -71,8 +71,8 @@ impl MemoryEngine {
     }
 
     pub fn remember(&mut self, args: RememberArgs) -> Result<Value, String> {
-        let namespace = args.namespace.clone();
-        let state = self.get_or_open_namespace(&namespace)?;
+        let state = self.get_or_open_namespace(&args.namespace)?;
+        let namespace = state.namespace().to_string();
         let recorded = state.append_memory(args)?;
 
         Ok(json!({
@@ -90,8 +90,8 @@ impl MemoryEngine {
     }
 
     pub fn recall(&mut self, args: RecallArgs) -> Result<Value, String> {
-        let namespace = args.namespace.clone();
-        let state = self.get_or_open_namespace(&namespace)?;
+        let state = self.get_or_open_namespace(&args.namespace)?;
+        let namespace = state.namespace().to_string();
         let result = state.recall(args)?;
 
         Ok(json!({
@@ -107,8 +107,9 @@ impl MemoryEngine {
     }
 
     pub fn keywords_list(&mut self, namespace: String) -> Result<Value, String> {
-        let ns = namespace.trim().to_string();
-        let state = self.get_or_open_namespace(&ns)?;
+        let input = namespace.trim();
+        let state = self.get_or_open_namespace(input)?;
+        let ns = state.namespace().to_string();
         let keywords = state.list_keywords()?;
         let total = keywords.len();
 
@@ -153,13 +154,15 @@ impl MemoryEngine {
     }
 
     fn get_or_open_namespace(&mut self, namespace: &str) -> Result<&mut NamespaceState, String> {
-        let key = namespace.trim().to_string();
-        if key.is_empty() {
+        let raw = namespace.trim();
+        if raw.is_empty() {
             return Err("namespace 不能为空".to_string());
         }
 
+        let paths = StorePaths::new(&self.root_dir, raw)?;
+        let key = paths.namespace.clone();
+
         if !self.namespaces.contains_key(&key) {
-            let paths = StorePaths::new(&self.root_dir, &key)?;
             let state = NamespaceState::open(paths)?;
             self.namespaces.insert(key.clone(), state);
         }
@@ -215,14 +218,14 @@ fn collect_global_keyword_stats(root_dir: &Path) -> GlobalKeywordStats {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            if index.version != 1 {
+            if index.version != index::INDEX_VERSION {
                 continue;
             }
 
             namespaces_scanned += 1;
             for (kw, postings) in index.keyword_postings {
                 let kw = kw.trim().to_lowercase();
-                if kw.is_empty() {
+                if kw.is_empty() || store::is_time_like_keyword(&kw) {
                     continue;
                 }
                 *keyword_namespaces.entry(kw.clone()).or_insert(0) += 1;
